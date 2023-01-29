@@ -86,6 +86,10 @@ class TweepyAsyncClientTests(IsolatedAsyncioTestCase):
         user_id = 783214  # User ID for @Twitter
         await self.client.get_users_mentions(user_id)
 
+    @tape.use_cassette("test_asyncclient_get_home_timeline.yaml")
+    async def test_get_home_timeline(self):
+        await self.client.get_home_timeline()
+
     @tape.use_cassette("test_asyncclient_get_users_tweets.yaml")
     async def test_get_users_tweets(self):
         user_id = 783214  # User ID for @Twitter
@@ -180,6 +184,29 @@ class TweepyAsyncClientTests(IsolatedAsyncioTestCase):
     # TODO: Test AsyncClient.get_space_buyers
 
     # TODO: Test AsyncClient.get_space_tweets
+
+    @tape.use_cassette(
+        "test_asyncclient_manage_and_lookup_direct_messages.yaml"
+    )
+    async def test_manage_and_lookup_direct_messages(self):
+        user_ids = [145336962, 750362064426721281]
+        # User IDs for @Harmon758 and @Harmon758Public
+        response = await self.client.create_direct_message(
+            participant_id=user_ids[1],
+            text="Testing 1"
+        )
+        dm_conversation_id = response.data["dm_conversation_id"]
+        await self.client.create_direct_message(
+            dm_conversation_id=dm_conversation_id,
+            text="Testing 2"
+        )
+        await self.client.create_direct_message_conversation(
+            text="Testing",
+            participant_ids=user_ids
+        )
+        await self.client.get_dm_events()
+        await self.client.get_dm_events(dm_conversation_id=dm_conversation_id)
+        await self.client.get_dm_events(participant_id=user_ids[1])
 
     @tape.use_cassette("test_asyncclient_get_list_tweets.yaml")
     async def test_get_list_tweets(self):

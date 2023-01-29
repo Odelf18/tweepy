@@ -1,5 +1,5 @@
 # Tweepy
-# Copyright 2009-2022 Joshua Roesslein
+# Copyright 2009-2023 Joshua Roesslein
 # See LICENSE for details.
 
 try:
@@ -20,6 +20,7 @@ from yarl import URL
 
 import tweepy
 from tweepy.client import BaseClient, Response
+from tweepy.direct_message_event import DirectMessageEvent
 from tweepy.errors import (
     BadRequest, Forbidden, HTTPException, NotFound, TooManyRequests,
     TwitterServerError, Unauthorized
@@ -75,6 +76,14 @@ class AsyncBaseClient(BaseClient):
             url, headers, body = oauth_client.sign(
                 url, method, headers=headers
             )
+            # oauthlib.oauth1.Client (OAuthClient) expects colons in query 
+            # values (e.g. in timestamps) to be percent-encoded, while
+            # aiohttp.ClientSession does not automatically encode them
+            before_query, question_mark, query = url.partition('?')
+            url = URL(
+                f"{before_query}?{query.replace(':', '%3A')}",
+                encoded = True
+            )
             params = None
         else:
             headers["Authorization"] = f"Bearer {self.bearer_token}"
@@ -119,7 +128,7 @@ class AsyncBaseClient(BaseClient):
                         f"Sleeping for {sleep_time} seconds."
                     )
                     await asyncio.sleep(sleep_time)
-                return self.request(method, route, params, json, user_auth)
+                return await self.request(method, route, params, json, user_auth)
             else:
                 raise TooManyRequests(response, response_json=response_json)
         if response.status >= 500:
@@ -130,7 +139,7 @@ class AsyncBaseClient(BaseClient):
         return response
 
     async def _make_request(
-        self, method, route, params={}, endpoint_parameters=None, json=None,
+        self, method, route, params={}, endpoint_parameters=(), json=None,
         data_type=None, user_auth=False
     ):
         request_params = self._process_params(params, endpoint_parameters)
@@ -146,16 +155,7 @@ class AsyncBaseClient(BaseClient):
         if self.return_type is dict:
             return response
 
-        data = response.get("data")
-        data = self._process_data(data, data_type=data_type)
-
-        includes = response.get("includes", {})
-        includes = self._process_includes(includes)
-
-        errors = response.get("errors", [])
-        meta = response.get("meta", {})
-
-        return Response(data, includes, errors, meta)
+        return self._construct_response(response, data_type=data_type)
 
 
 class AsyncClient(AsyncBaseClient):
@@ -243,7 +243,7 @@ class AsyncClient(AsyncBaseClient):
 
             A request is made beforehand to Twitter's API to determine the
             authenticating user's ID. This is cached and only done once per
-            :class:`Client` instance for each access token used.
+            :class:`AsyncClient` instance for each access token used.
 
         Parameters
         ----------
@@ -285,7 +285,7 @@ class AsyncClient(AsyncBaseClient):
 
             A request is made beforehand to Twitter's API to determine the
             authenticating user's ID. This is cached and only done once per
-            :class:`Client` instance for each access token used.
+            :class:`AsyncClient` instance for each access token used.
 
         Parameters
         ----------
@@ -345,7 +345,7 @@ class AsyncClient(AsyncBaseClient):
 
             A request is made beforehand to Twitter's API to determine the
             authenticating user's ID. This is cached and only done once per
-            :class:`Client` instance for each access token used.
+            :class:`AsyncClient` instance for each access token used.
 
         Parameters
         ----------
@@ -436,7 +436,8 @@ class AsyncClient(AsyncBaseClient):
             When using OAuth 2.0 Authorization Code Flow with PKCE with
             ``user_auth=False``, a request is made beforehand to Twitter's API
             to determine the authenticating user's ID. This is cached and only
-            done once per :class:`Client` instance for each access token used.
+            done once per :class:`AsyncClient` instance for each access token
+            used.
 
         Parameters
         ----------
@@ -588,7 +589,8 @@ class AsyncClient(AsyncBaseClient):
             When using OAuth 2.0 Authorization Code Flow with PKCE with
             ``user_auth=False``, a request is made beforehand to Twitter's API
             to determine the authenticating user's ID. This is cached and only
-            done once per :class:`Client` instance for each access token used.
+            done once per :class:`AsyncClient` instance for each access token
+            used.
 
         Parameters
         ----------
@@ -755,9 +757,10 @@ class AsyncClient(AsyncBaseClient):
 
     async def get_quote_tweets(self, id, *, user_auth=False, **params):
         """get_quote_tweets( \
-            id, *, expansions=None, max_results=None, media_fields=None, \
-            pagination_token=None, place_fields=None, poll_fields=None, \
-            tweet_fields=None, user_fields=None, user_auth=False \
+            id, *, exclude=None, expansions=None, max_results=None, \
+            media_fields=None, pagination_token=None, place_fields=None, \
+            poll_fields=None, tweet_fields=None, user_fields=None, \
+            user_auth=False \
         )
 
         Returns Quote Tweets for a Tweet specified by the requested Tweet ID.
@@ -765,10 +768,16 @@ class AsyncClient(AsyncBaseClient):
         The Tweets returned by this endpoint count towards the Project-level
         `Tweet cap`_.
 
+        .. versionchanged:: 4.11
+            Added ``exclude`` parameter
+
         Parameters
         ----------
         id : int | str
             Unique identifier of the Tweet to request.
+        exclude : list[str] | str | None
+            Comma-separated list of the types of Tweets to exclude from the
+            response.
         expansions : list[str] | str | None
             :ref:`expansions_parameter`
         max_results : int | None
@@ -808,7 +817,7 @@ class AsyncClient(AsyncBaseClient):
         return await self._make_request(
             "GET", f"/2/tweets/{id}/quote_tweets", params=params,
             endpoint_parameters=(
-                "expansions", "max_results", "media.fields",
+                "exclude", "expansions", "max_results", "media.fields",
                 "pagination_token", "place.fields", "poll.fields",
                 "tweet.fields", "user.fields"
             ), data_type=Tweet, user_auth=user_auth
@@ -828,7 +837,8 @@ class AsyncClient(AsyncBaseClient):
             When using OAuth 2.0 Authorization Code Flow with PKCE with
             ``user_auth=False``, a request is made beforehand to Twitter's API
             to determine the authenticating user's ID. This is cached and only
-            done once per :class:`Client` instance for each access token used.
+            done once per :class:`AsyncClient` instance for each access token
+            used.
 
         Parameters
         ----------
@@ -920,7 +930,8 @@ class AsyncClient(AsyncBaseClient):
             When using OAuth 2.0 Authorization Code Flow with PKCE with
             ``user_auth=False``, a request is made beforehand to Twitter's API
             to determine the authenticating user's ID. This is cached and only
-            done once per :class:`Client` instance for each access token used.
+            done once per :class:`AsyncClient` instance for each access token
+            used.
 
         Parameters
         ----------
@@ -1251,6 +1262,112 @@ class AsyncClient(AsyncBaseClient):
                 "end_time", "expansions", "max_results", "media.fields",
                 "pagination_token", "place.fields", "poll.fields", "since_id",
                 "start_time", "tweet.fields", "until_id", "user.fields"
+            ), data_type=Tweet, user_auth=user_auth
+        )
+
+    async def get_home_timeline(self, *, user_auth=True, **params):
+        """get_home_timeline( \
+            *, end_time=None, exclude=None, expansions=None, \
+            max_results=None, media_fields=None, pagination_token=None, \
+            place_fields=None, poll_fields=None, since_id=None, \
+            start_time=None, tweet_fields=None, until_id=None, \
+            user_fields=None, user_auth=True \
+        )
+
+        Allows you to retrieve a collection of the most recent Tweets and
+        Retweets posted by you and users you follow. This endpoint returns up
+        to the last 3200 Tweets.
+
+        .. note::
+
+            When using OAuth 2.0 Authorization Code Flow with PKCE with
+            ``user_auth=False``, a request is made beforehand to Twitter's API
+            to determine the authenticating user's ID. This is cached and only
+            done once per :class:`AsyncClient` instance for each access token
+            used.
+
+        Parameters
+        ----------
+        end_time : datetime.datetime | str | None
+            YYYY-MM-DDTHH:mm:ssZ (ISO 8601/RFC 3339). The new UTC timestamp
+            from which the Tweets will be provided. Timestamp is in second
+            granularity and is inclusive (for example, 12:00:01 includes the
+            first second of the minute).
+
+            Please note that this parameter does not support a millisecond
+            value.
+        exclude : list[str] | str | None
+            Comma-separated list of the types of Tweets to exclude from the
+            response.
+        expansions : list[str] | str | None
+            :ref:`expansions_parameter`
+        max_results : int | None
+            Specifies the number of Tweets to try and retrieve, up to a maximum
+            of 100 per distinct request. By default, 100 results are returned
+            if this parameter is not supplied. The minimum permitted value is
+            1. It is possible to receive less than the ``max_results`` per
+            request throughout the pagination process.
+        media_fields : list[str] | str | None
+            :ref:`media_fields_parameter`
+        pagination_token : str | None
+            This parameter is used to move forwards or backwards through
+            'pages' of results, based on the value of the ``next_token`` or
+            ``previous_token`` in the response. The value used with the
+            parameter is pulled directly from the response provided by the API,
+            and should not be modified.
+        place_fields : list[str] | str | None
+            :ref:`place_fields_parameter`
+        poll_fields : list[str] | str | None
+            :ref:`poll_fields_parameter`
+        since_id : int | str | None
+            Returns results with a Tweet ID greater than (that is, more recent
+            than) the specified 'since' Tweet ID. There are limits to the
+            number of Tweets that can be accessed through the API. If the
+            limit of Tweets has occurred since the ``since_id``, the
+            ``since_id`` will be forced to the oldest ID available. More
+            information on Twitter IDs is `here`_.
+        start_time : datetime.datetime | str | None
+            YYYY-MM-DDTHH:mm:ssZ (ISO 8601/RFC 3339). The oldest UTC timestamp
+            from which the Tweets will be provided. Timestamp is in second
+            granularity and is inclusive (for example, 12:00:01 includes the
+            first second of the minute).
+
+            Please note that this parameter does not support a millisecond
+            value.
+        tweet_fields : list[str] | str | None
+            :ref:`tweet_fields_parameter`
+        until_id : int | str | None
+            Returns results with a Tweet ID less than (that is, older than) the
+            specified 'until' Tweet ID. There are limits to the number of
+            Tweets that can be accessed through the API. If the limit of Tweets
+            has occurred since the ``until_id``, the ``until_id`` will be
+            forced to the most recent ID available. More information on Twitter
+            IDs is `here`_.
+        user_fields : list[str] | str | None
+            :ref:`user_fields_parameter`
+        user_auth : bool
+            Whether or not to use OAuth 1.0a User Context to authenticate
+
+        Returns
+        -------
+        dict | requests.Response | Response
+
+        References
+        ----------
+        https://developer.twitter.com/en/docs/twitter-api/tweets/timelines/api-reference/get-users-id-reverse-chronological
+
+        .. _here: https://developer.twitter.com/en/docs/twitter-ids
+        """
+        id = await self._get_authenticating_user_id(oauth_1=user_auth)
+        route = f"/2/users/{id}/timelines/reverse_chronological"
+
+        return await self._make_request(
+            "GET", route, params=params,
+            endpoint_parameters=(
+                "end_time", "exclude", "expansions", "max_results",
+                "media.fields", "pagination_token", "place.fields",
+                "poll.fields", "since_id", "start_time", "tweet.fields",
+                "until_id", "user.fields"
             ), data_type=Tweet, user_auth=user_auth
         )
 
@@ -1613,7 +1730,8 @@ class AsyncClient(AsyncBaseClient):
             When using OAuth 2.0 Authorization Code Flow with PKCE with
             ``user_auth=False``, a request is made beforehand to Twitter's API
             to determine the authenticating user's ID. This is cached and only
-            done once per :class:`Client` instance for each access token used.
+            done once per :class:`AsyncClient` instance for each access token
+            used.
 
         Parameters
         ----------
@@ -1657,7 +1775,8 @@ class AsyncClient(AsyncBaseClient):
             When using OAuth 2.0 Authorization Code Flow with PKCE with
             ``user_auth=False``, a request is made beforehand to Twitter's API
             to determine the authenticating user's ID. This is cached and only
-            done once per :class:`Client` instance for each access token used.
+            done once per :class:`AsyncClient` instance for each access token
+            used.
 
         Parameters
         ----------
@@ -1710,7 +1829,8 @@ class AsyncClient(AsyncBaseClient):
             When using OAuth 2.0 Authorization Code Flow with PKCE with
             ``user_auth=False``, a request is made beforehand to Twitter's API
             to determine the authenticating user's ID. This is cached and only
-            done once per :class:`Client` instance for each access token used.
+            done once per :class:`AsyncClient` instance for each access token
+            used.
 
         Parameters
         ----------
@@ -1753,7 +1873,8 @@ class AsyncClient(AsyncBaseClient):
             When using OAuth 2.0 Authorization Code Flow with PKCE with
             ``user_auth=False``, a request is made beforehand to Twitter's API
             to determine the authenticating user's ID. This is cached and only
-            done once per :class:`Client` instance for each access token used.
+            done once per :class:`AsyncClient` instance for each access token
+            used.
 
         Parameters
         ----------
@@ -1894,7 +2015,8 @@ class AsyncClient(AsyncBaseClient):
             When using OAuth 2.0 Authorization Code Flow with PKCE with
             ``user_auth=False``, a request is made beforehand to Twitter's API
             to determine the authenticating user's ID. This is cached and only
-            done once per :class:`Client` instance for each access token used.
+            done once per :class:`AsyncClient` instance for each access token
+            used.
 
         Parameters
         ----------
@@ -1939,7 +2061,8 @@ class AsyncClient(AsyncBaseClient):
             When using OAuth 2.0 Authorization Code Flow with PKCE with
             ``user_auth=False``, a request is made beforehand to Twitter's API
             to determine the authenticating user's ID. This is cached and only
-            done once per :class:`Client` instance for each access token used.
+            done once per :class:`AsyncClient` instance for each access token
+            used.
 
         Parameters
         ----------
@@ -1983,7 +2106,8 @@ class AsyncClient(AsyncBaseClient):
             When using OAuth 2.0 Authorization Code Flow with PKCE with
             ``user_auth=False``, a request is made beforehand to Twitter's API
             to determine the authenticating user's ID. This is cached and only
-            done once per :class:`Client` instance for each access token used.
+            done once per :class:`AsyncClient` instance for each access token
+            used.
 
         Parameters
         ----------
@@ -2036,7 +2160,8 @@ class AsyncClient(AsyncBaseClient):
             When using OAuth 2.0 Authorization Code Flow with PKCE with
             ``user_auth=False``, a request is made beforehand to Twitter's API
             to determine the authenticating user's ID. This is cached and only
-            done once per :class:`Client` instance for each access token used.
+            done once per :class:`AsyncClient` instance for each access token
+            used.
 
         Parameters
         ----------
@@ -2436,15 +2561,250 @@ class AsyncClient(AsyncBaseClient):
             ), data_type=Tweet
         )
 
+    # Direct Messages lookup
+
+    async def get_direct_message_events(
+        self, *, dm_conversation_id=None, participant_id=None, user_auth=True,
+        **params
+    ):
+        """get_direct_message_events( \
+            *, dm_conversation_id=None, participant_id=None, \
+            dm_event_fields=None, event_types=None, expansions=None, \
+            max_results=None, media_fields=None, pagination_token=None, \
+            tweet_fields=None, user_fields=None, user_auth=True \
+        )
+
+        If ``dm_conversation_id`` is passed, returns a list of Direct Messages
+        within the conversation specified. Messages are returned in reverse
+        chronological order.
+
+        If ``participant_id`` is passed, returns a list of Direct Messages (DM)
+        events within a 1-1 conversation with the user specified. Messages are
+        returned in reverse chronological order.
+
+        If neither is passed, returns a list of Direct Messages for the
+        authenticated user, both sent and received. Direct Message events are
+        returned in reverse chronological order. Supports retrieving events
+        from the previous 30 days.
+
+        .. note::
+        
+            There is an alias for this method named ``get_dm_events``.
+
+        .. versionadded:: 4.12
+
+        Parameters
+        ----------
+        dm_conversation_id : str | None
+            The ``id`` of the Direct Message conversation for which events are
+            being retrieved.
+        participant_id : int | str | None
+            The ``participant_id`` of the user that the authenicating user is
+            having a 1-1 conversation with.
+        dm_event_fields : list[str] | str | None
+            Extra fields to include in the event payload. ``id`` and
+            ``event_type`` are returned by default. The ``text`` value isn't
+            included for ``ParticipantsJoin`` and ``ParticipantsLeave`` events.
+        event_types : str
+            The type of Direct Message event to returm. If not included, all
+            types are returned.
+        expansions : list[str] | str | None
+            :ref:`expansions_parameter`
+        max_results : int | None
+            The maximum number of results to be returned in a page. Must be
+            between 1 and 100. The default is 100.
+        media_fields : list[str] | str | None
+            :ref:`media_fields_parameter`
+        pagination_token : str | None
+            Contains either the ``next_token`` or ``previous_token`` value.
+        tweet_fields : list[str] | str | None
+            :ref:`tweet_fields_parameter`
+        user_fields : list[str] | str | None
+            :ref:`user_fields_parameter`
+        user_auth : bool
+            Whether or not to use OAuth 1.0a User Context to authenticate
+
+        Raises
+        ------
+        TypeError
+            If both ``dm_conversation_id`` and ``participant_id`` are passed
+
+        Returns
+        -------
+        dict | aiohttp.ClientResponse | Response
+
+        References
+        ----------
+        https://developer.twitter.com/en/docs/twitter-api/direct-messages/lookup/api-reference/get-dm_events
+        https://developer.twitter.com/en/docs/twitter-api/direct-messages/lookup/api-reference/get-dm_conversations-with-participant_id-dm_events
+        https://developer.twitter.com/en/docs/twitter-api/direct-messages/lookup/api-reference/get-dm_conversations-dm_conversation_id-dm_events
+        """
+        if dm_conversation_id is not None and participant_id is not None:
+            raise TypeError(
+                "Expected DM conversation ID or participant ID, not both"
+            )
+        elif dm_conversation_id is not None:
+            path = f"/2/dm_conversations/{dm_conversation_id}/dm_events"
+        elif participant_id is not None:
+            path = f"/2/dm_conversations/with/{participant_id}/dm_events"
+        else:
+            path = "/2/dm_events"
+
+        return await self._make_request(
+            "GET", path, params=params,
+            endpoint_parameters=(
+                "dm_event.fields", "event_types", "expansions", "max_results",
+                "media.fields", "pagination_token", "tweet.fields",
+                "user.fields"
+            ), data_type=DirectMessageEvent, user_auth=user_auth
+        )
+
+    get_dm_events = get_direct_message_events
+
+    # Manage Direct Messages
+
+    async def create_direct_message(
+        self, *, dm_conversation_id=None, participant_id=None, media_id=None,
+        text=None, user_auth=True
+    ):
+        """If ``dm_conversation_id`` is passed, creates a Direct Message on
+        behalf of the authenticated user, and adds it to the specified
+        conversation.
+
+        If ``participant_id`` is passed, creates a one-to-one Direct Message
+        and adds it to the one-to-one conversation. This method either creates
+        a new one-to-one conversation or retrieves the current conversation and
+        adds the Direct Message to it.
+
+        .. note::
+        
+            There is an alias for this method named ``create_dm``.
+
+        .. versionadded:: 4.12
+
+        Parameters
+        ----------
+        dm_conversation_id : str | None
+            The ``dm_conversation_id`` of the conversation to add the Direct
+            Message to. Supports both 1-1 and group conversations.
+        participant_id : int | str | None
+            The User ID of the account this one-to-one Direct Message is to be
+            sent to.
+        media_id : int | str | None
+            A single Media ID being attached to the Direct Message. This field
+            is required if ``text`` is not present. For this launch, only 1
+            attachment is supported.
+        text : str | None
+            Text of the Direct Message being created. This field is required if
+            ``media_id`` is not present. Text messages support up to 10,000
+            characters.
+        user_auth : bool
+            Whether or not to use OAuth 1.0a User Context to authenticate
+
+        Raises
+        ------
+        TypeError
+            If ``dm_conversation_id`` and ``participant_id`` are not passed or
+            both are passed
+
+        Returns
+        -------
+        dict | aiohttp.ClientResponse | Response
+
+        References
+        ----------
+        https://developer.twitter.com/en/docs/twitter-api/direct-messages/manage/api-reference/post-dm_conversations-dm_conversation_id-messages
+        https://developer.twitter.com/en/docs/twitter-api/direct-messages/manage/api-reference/post-dm_conversations-with-participant_id-messages
+        """
+        if dm_conversation_id is not None and participant_id is not None:
+            raise TypeError(
+                "Expected DM conversation ID or participant ID, not both"
+            )
+        elif dm_conversation_id is not None:
+            path = f"/2/dm_conversations/{dm_conversation_id}/messages"
+        elif participant_id is not None:
+            path = f"/2/dm_conversations/with/{participant_id}/messages"
+        else:
+            raise TypeError("DM conversation ID or participant ID is required")
+
+        json = {}
+        if media_id is not None:
+            json["attachments"] = [{"media_id": str(media_id)}]
+        if text is not None:
+            json["text"] = text
+
+        return await self._make_request(
+            "POST", path, json=json, user_auth=user_auth
+        )
+
+    create_dm = create_direct_message
+
+    async def create_direct_message_conversation(
+        self, *, media_id=None, text=None, participant_ids, user_auth=True
+    ):
+        """Creates a new group conversation and adds a Direct Message to it on
+        behalf of the authenticated user.
+
+        .. note::
+        
+            There is an alias for this method named ``create_dm_conversation``.
+
+        .. versionadded:: 4.12
+
+        Parameters
+        ----------
+        media_id : int | str | None
+            A single Media ID being attached to the Direct Message. This field
+            is required if ``text`` is not present. For this launch, only 1
+            attachment is supported.
+        text : str | None
+            Text of the Direct Message being created. This field is required if
+            ``media_id`` is not present. Text messages support up to 10,000
+            characters.
+        participant_ids : list[int | str]
+            An array of User IDs that the conversation is created with.
+            Conversations can have up to 50 participants.
+        user_auth : bool
+            Whether or not to use OAuth 1.0a User Context to authenticate
+
+        Returns
+        -------
+        dict | aiohttp.ClientResponse | Response
+
+        References
+        ----------
+        https://developer.twitter.com/en/docs/twitter-api/direct-messages/manage/api-reference/post-dm_conversations
+        """
+        json = {
+            "conversation_type": "Group",
+            "message": {},
+            "participant_ids": list(map(str, participant_ids))
+        }
+        if media_id is not None:
+            json["message"]["attachments"] = [{"media_id": str(media_id)}]
+        if text is not None:
+            json["message"]["text"] = text
+
+        return await self._make_request(
+            "POST", "/2/dm_conversations", json=json, user_auth=user_auth
+        )
+
+    create_dm_conversation = create_direct_message_conversation
+
     # List Tweets lookup
 
     async def get_list_tweets(self, id, *, user_auth=False, **params):
         """get_list_tweets( \
-            id, *, expansions=None, max_results=None, pagination_token=None, \
+            id, *, expansions=None, max_results=None, media_fields=None, \
+            pagination_token=None, place_fields=None, poll_fields=None, \
             tweet_fields=None, user_fields=None, user_auth=False \
         )
 
         Returns a list of Tweets from the specified List.
+
+        .. versionchanged:: 4.10.1
+            Added ``media_fields``, ``place_fields``, and ``poll_fields``
+            parameters
 
         Parameters
         ----------
@@ -2456,12 +2816,18 @@ class AsyncClient(AsyncBaseClient):
             The maximum number of results to be returned per page. This can be
             a number between 1 and 100. By default, each page will return 100
             results.
+        media_fields : list[str] | str | None
+            :ref:`media_fields_parameter`
         pagination_token : str | None
             Used to request the next page of results if all results weren't
             returned with the latest request, or to go back to the previous
             page of results. To return the next page, pass the next_token
             returned in your previous response. To go back one page, pass the
             previous_token returned in your previous response.
+        place_fields : list[str] | str | None
+            :ref:`place_fields_parameter`
+        poll_fields : list[str] | str | None
+            :ref:`poll_fields_parameter`
         tweet_fields : list[str] | str | None
             :ref:`tweet_fields_parameter`
         user_fields : list[str] | str | None
@@ -2480,7 +2846,8 @@ class AsyncClient(AsyncBaseClient):
         return await self._make_request(
             "GET", f"/2/lists/{id}/tweets", params=params,
             endpoint_parameters=(
-                "expansions", "max_results", "pagination_token",
+                "expansions", "max_results", "media.fields",
+                "pagination_token", "place.fields", "poll.fields",
                 "tweet.fields", "user.fields"
             ), data_type=Tweet, user_auth=user_auth
         )
@@ -2495,7 +2862,8 @@ class AsyncClient(AsyncBaseClient):
             When using OAuth 2.0 Authorization Code Flow with PKCE with
             ``user_auth=False``, a request is made beforehand to Twitter's API
             to determine the authenticating user's ID. This is cached and only
-            done once per :class:`Client` instance for each access token used.
+            done once per :class:`AsyncClient` instance for each access token
+            used.
 
         Parameters
         ----------
@@ -2626,7 +2994,8 @@ class AsyncClient(AsyncBaseClient):
             When using OAuth 2.0 Authorization Code Flow with PKCE with
             ``user_auth=False``, a request is made beforehand to Twitter's API
             to determine the authenticating user's ID. This is cached and only
-            done once per :class:`Client` instance for each access token used.
+            done once per :class:`AsyncClient` instance for each access token
+            used.
 
         Parameters
         ----------
@@ -2996,7 +3365,8 @@ class AsyncClient(AsyncBaseClient):
             When using OAuth 2.0 Authorization Code Flow with PKCE with
             ``user_auth=False``, a request is made beforehand to Twitter's API
             to determine the authenticating user's ID. This is cached and only
-            done once per :class:`Client` instance for each access token used.
+            done once per :class:`AsyncClient` instance for each access token
+            used.
 
         Parameters
         ----------
@@ -3036,7 +3406,8 @@ class AsyncClient(AsyncBaseClient):
             When using OAuth 2.0 Authorization Code Flow with PKCE with
             ``user_auth=False``, a request is made beforehand to Twitter's API
             to determine the authenticating user's ID. This is cached and only
-            done once per :class:`Client` instance for each access token used.
+            done once per :class:`AsyncClient` instance for each access token
+            used.
 
         Parameters
         ----------
@@ -3080,7 +3451,8 @@ class AsyncClient(AsyncBaseClient):
             When using OAuth 2.0 Authorization Code Flow with PKCE with
             ``user_auth=False``, a request is made beforehand to Twitter's API
             to determine the authenticating user's ID. This is cached and only
-            done once per :class:`Client` instance for each access token used.
+            done once per :class:`AsyncClient` instance for each access token
+            used.
 
         Parameters
         ----------

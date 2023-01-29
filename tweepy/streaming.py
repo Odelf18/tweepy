@@ -1,5 +1,5 @@
 # Tweepy
-# Copyright 2009-2022 Joshua Roesslein
+# Copyright 2009-2023 Joshua Roesslein
 # See LICENSE for details.
 
 # Appengine users: https://developers.google.com/appengine/docs/python/sockets/#making_httplib_use_sockets
@@ -10,6 +10,7 @@ import logging
 from math import inf
 from platform import python_version
 import ssl
+import traceback
 from threading import Thread
 from time import sleep
 from typing import NamedTuple
@@ -50,20 +51,22 @@ class BaseStream:
             f"Tweepy/{tweepy.__version__}"
         )
 
-    def _connect(self, method, url, auth=None, params=None, headers=None,
-                 body=None):
+    def _connect(
+        self, method, url, auth=None, params=None, headers=None, body=None,
+        timeout=21
+    ):
         self.running = True
 
         error_count = 0
         # https://developer.twitter.com/en/docs/twitter-api/v1/tweets/filter-realtime/guides/connecting
         # https://developer.twitter.com/en/docs/twitter-api/tweets/filtered-stream/integrate/handling-disconnections
         # https://developer.twitter.com/en/docs/twitter-api/tweets/volume-streams/integrate/handling-disconnections
-        stall_timeout = 90
-        network_error_wait = network_error_wait_step = 0.25
+        network_error_wait = 0
+        network_error_wait_step = 0.25
         network_error_wait_max = 16
         http_error_wait = http_error_wait_start = 5
         http_error_wait_max = 320
-        http_420_error_wait_start = 60
+        http_429_error_wait_start = 60
 
         self.session.headers["User-Agent"] = self.user_agent
 
@@ -72,13 +75,13 @@ class BaseStream:
                 try:
                     with self.session.request(
                         method, url, params=params, headers=headers, data=body,
-                        timeout=stall_timeout, stream=True, auth=auth,
+                        timeout=timeout, stream=True, auth=auth,
                         verify=self.verify, proxies=self.proxies
                     ) as resp:
                         if resp.status_code == 200:
                             error_count = 0
                             http_error_wait = http_error_wait_start
-                            network_error_wait = network_error_wait_step
+                            network_error_wait = 0
 
                             self.on_connect()
                             if not self.running:
@@ -100,12 +103,19 @@ class BaseStream:
                             self.on_request_error(resp.status_code)
                             if not self.running:
                                 break
+                            # The error text is logged here instead of in
+                            # on_request_error to keep on_request_error
+                            # backwards-compatible. In a future version, the
+                            # Response should be passed to on_request_error.
+                            log.error(
+                                "HTTP error response text: %s", resp.text
+                            )
 
                             error_count += 1
 
-                            if resp.status_code == 420:
-                                if http_error_wait < http_420_error_wait_start:
-                                    http_error_wait = http_420_error_wait_start
+                            if resp.status_code in (420, 429):
+                                if http_error_wait < http_429_error_wait_start:
+                                    http_error_wait = http_429_error_wait_start
 
                             sleep(http_error_wait)
 
@@ -126,6 +136,16 @@ class BaseStream:
                     self.on_connection_error()
                     if not self.running:
                         break
+                    # The error text is logged here instead of in
+                    # on_connection_error to keep on_connection_error
+                    # backwards-compatible. In a future version, the error
+                    # should be passed to on_connection_error.
+                    log.error(
+                        "Connection error: %s",
+                        "".join(
+                            traceback.format_exception_only(type(exc), exc)
+                        ).rstrip()
+                    )
 
                     sleep(network_error_wait)
 
@@ -198,7 +218,20 @@ class BaseStream:
 
 
 class Stream(BaseStream):
-    """Filter and sample realtime Tweets with Twitter API v1.1
+    """Filter realtime Tweets with Twitter API v1.1
+
+    .. note::
+
+        New Twitter Developer Apps created on or after April 29, 2022 `will not
+        be able to gain access to v1.1 statuses/filter`_, the Twitter API v1.1
+        endpoint that :class:`Stream` uses. Twitter API v2 can be used instead
+        with :class:`StreamingClient`.
+
+    .. versionchanged:: 4.13
+        Removed ``sample``, ``on_delete``, ``on_scrub_geo``,
+        ``on_status_withheld``, and ``on_user_withheld`` methods, as `the
+        Twitter API v1.1 statuses/sample endpoint and compliance messages on
+        the Twitter API v1.1 statuses/filter endpoint have been retired`_
 
     Parameters
     ----------
@@ -238,6 +271,11 @@ class Stream(BaseStream):
         Thread used to run the stream
     user_agent : str
         User agent used when connecting to the stream
+
+
+    .. _will not be able to gain access to v1.1 statuses/filter: https://twittercommunity.com/t/deprecation-announcement-removing-compliance-messages-from-statuses-filter-and-retiring-statuses-sample-from-the-twitter-api-v1-1/170500
+    .. _the Twitter API v1.1 statuses/sample endpoint and compliance messages
+        on the Twitter API v1.1 statuses/filter endpoint have been retired: https://twittercommunity.com/t/deprecation-announcement-removing-compliance-messages-from-statuses-filter-and-retiring-statuses-sample-from-the-twitter-api-v1-1/170500
     """
 
     def __init__(self, consumer_key, consumer_secret, access_token,
@@ -258,7 +296,7 @@ class Stream(BaseStream):
         auth = OAuth1(self.consumer_key, self.consumer_secret,
                       self.access_token, self.access_token_secret)
         url = f"https://stream.twitter.com/1.1/{endpoint}.json"
-        super()._connect(method, url, auth=auth, **kwargs)
+        super()._connect(method, url, auth=auth, timeout=90, **kwargs)
 
     def filter(self, *, follow=None, track=None, locations=None,
                filter_level=None, languages=None, stall_warnings=False,
@@ -304,7 +342,8 @@ class Stream(BaseStream):
         Raises
         ------
         TweepyException
-            When number of location coordinates is not a multiple of 4
+            When the stream is already connected or when the number of location
+            coordinates is not a multiple of 4
 
         Returns
         -------
@@ -352,59 +391,6 @@ class Stream(BaseStream):
         else:
             self._connect(method, endpoint, headers=headers, body=body)
 
-    def sample(self, *, languages=None, stall_warnings=False, threaded=False):
-        """Sample realtime Tweets
-
-        .. deprecated:: 4.9
-            `The Twitter API v1.1 endpoint this method uses is now deprecated
-            and will be retired on October 29, 2022.`_ Twitter API v2 can be
-            used instead with :meth:`StreamingClient.sample`.
-
-        Parameters
-        ----------
-        languages : list[str] | None
-            Setting this parameter to a comma-separated list of `BCP 47`_
-            language identifiers corresponding to any of the languages listed
-            on Twitter’s `advanced search`_ page will only return Tweets that
-            have been detected as being written in the specified languages. For
-            example, connecting with language=en will only stream Tweets
-            detected to be in the English language.
-        stall_warnings : bool
-            Specifies whether stall warnings should be delivered
-        threaded : bool
-            Whether or not to use a thread to run the stream
-
-        Returns
-        -------
-        threading.Thread | None
-            The thread if ``threaded`` is set to ``True``, else ``None``
-
-        References
-        ----------
-        https://developer.twitter.com/en/docs/twitter-api/v1/tweets/sample-realtime/api-reference/get-statuses-sample
-
-        .. _BCP 47: https://tools.ietf.org/html/bcp47
-        .. _advanced search: https://twitter.com/search-advanced
-        .. _The Twitter API v1.1 endpoint this method uses is now deprecated
-            and will be retired on October 29, 2022.: https://twittercommunity.com/t/deprecation-announcement-removing-compliance-messages-from-statuses-filter-and-retiring-statuses-sample-from-the-twitter-api-v1-1/170500
-        """
-        if self.running:
-            raise TweepyException("Stream is already connected")
-
-        method = "GET"
-        endpoint = "statuses/sample"
-
-        params = {}
-        if languages:
-            params["language"] = ','.join(map(str, languages))
-        if stall_warnings:
-            params["stall_warnings"] = "true"
-
-        if threaded:
-            return self._threaded_connect(method, endpoint, params=params)
-        else:
-            self._connect(method, endpoint, params=params)
-
     def on_data(self, raw_data):
         """This is called when raw data is received from the stream.
         This method handles sending the data to other methods based on the
@@ -424,19 +410,10 @@ class Stream(BaseStream):
         if "in_reply_to_status_id" in data:
             status = Status.parse(None, data)
             return self.on_status(status)
-        if "delete" in data:
-            delete = data["delete"]["status"]
-            return self.on_delete(delete["id"], delete["user_id"])
         if "disconnect" in data:
             return self.on_disconnect_message(data["disconnect"])
         if "limit" in data:
             return self.on_limit(data["limit"]["track"])
-        if "scrub_geo" in data:
-            return self.on_scrub_geo(data["scrub_geo"])
-        if "status_withheld" in data:
-            return self.on_status_withheld(data["status_withheld"])
-        if "user_withheld" in data:
-            return self.on_user_withheld(data["user_withheld"])
         if "warning" in data:
             return self.on_warning(data["warning"])
 
@@ -451,18 +428,6 @@ class Stream(BaseStream):
             The Status received
         """
         log.debug("Received status: %d", status.id)
-
-    def on_delete(self, status_id, user_id):
-        """This is called when a status deletion notice is received.
-
-        Parameters
-        ----------
-        status_id : int
-            The ID of the deleted Tweet
-        user_id : int
-            The ID of the author of the Tweet
-        """
-        log.debug("Received status deletion notice: %d", status_id)
 
     def on_disconnect_message(self, message):
         """This is called when a disconnect message is received.
@@ -484,36 +449,6 @@ class Stream(BaseStream):
             connection was opened
         """
         log.debug("Received limit notice: %d", track)
-
-    def on_scrub_geo(self, notice):
-        """This is called when a location deletion notice is received.
-
-        Parameters
-        ----------
-        notice : JSON
-            The location deletion notice
-        """
-        log.debug("Received location deletion notice: %s", notice)
-
-    def on_status_withheld(self, notice):
-        """This is called when a status withheld content notice is received.
-
-        Parameters
-        ----------
-        notice : JSON
-            The status withheld content notice
-        """
-        log.debug("Received status withheld content notice: %s", notice)
-
-    def on_user_withheld(self, notice):
-        """This is called when a user withheld content notice is received.
-
-        Parameters
-        ----------
-        notice : JSON
-            The user withheld content notice
-        """
-        log.debug("Received user withheld content notice: %s", notice)
 
     def on_warning(self, warning):
         """This is called when a stall warning message is received.
@@ -538,7 +473,9 @@ class StreamingClient(BaseClient, BaseStream):
     return_type : type[dict | requests.Response | Response]
         Type to return from requests to the API
     wait_on_rate_limit : bool
-        Whether to wait when rate limit is reached
+        Whether or not to wait before retrying when a rate limit is
+        encountered. This applies to requests besides those that connect to a
+        stream (see ``max_retries``).
     chunk_size : int
         The default socket.read size. Default to 512, less than half the size
         of a Tweet so that it reads Tweets with the minimal latency of 2 reads
@@ -606,7 +543,7 @@ class StreamingClient(BaseClient, BaseStream):
                 else:
                     return StreamRule(value=data["value"], id=data["id"])
         else:
-            super()._process_data(data, data_type=data_type)
+            return super()._process_data(data, data_type=data_type)
 
     def add_rules(self, add, **params):
         """add_rules(add, *, dry_run)
@@ -618,8 +555,8 @@ class StreamingClient(BaseClient, BaseStream):
         add : list[StreamRule] | StreamRule
             Specifies the operation you want to perform on the rules.
         dry_run : bool
-            Set to true to test a the syntax of your rule without submitting
-            it. This is useful if you want to check the syntax of a rule before
+            Set to true to test the syntax of your rule without submitting it.
+            This is useful if you want to check the syntax of a rule before
             removing one or more of your existing rules.
 
         Returns
@@ -655,8 +592,8 @@ class StreamingClient(BaseClient, BaseStream):
             Array of rule IDs, each one representing a rule already active in
             your stream. IDs must be submitted as strings.
         dry_run : bool
-            Set to true to test a the syntax of your rule without submitting
-            it. This is useful if you want to check the syntax of a rule before
+            Set to true to test the syntax of your rule without submitting it.
+            This is useful if you want to check the syntax of a rule before
             removing one or more of your existing rules.
 
         Returns
@@ -672,7 +609,7 @@ class StreamingClient(BaseClient, BaseStream):
             ids = (ids,)
         for id in ids:
             if isinstance(id, StreamRule):
-                json["delete"]["ids"].append(str(StreamRule.id))
+                json["delete"]["ids"].append(str(id.id))
             else:
                 json["delete"]["ids"].append(str(id))
 
@@ -730,6 +667,11 @@ class StreamingClient(BaseClient, BaseStream):
             :ref:`user_fields_parameter`
         threaded : bool
             Whether or not to use a thread to run the stream
+
+        Raises
+        ------
+        TweepyException
+            When the stream is already connected
 
         Returns
         -------
@@ -833,6 +775,11 @@ class StreamingClient(BaseClient, BaseStream):
         threaded : bool
             Whether or not to use a thread to run the stream
 
+        Raises
+        ------
+        TweepyException
+            When the stream is already connected
+
         Returns
         -------
         threading.Thread | None
@@ -907,7 +854,7 @@ class StreamingClient(BaseClient, BaseStream):
 
         Parameters
         ----------
-        status : Tweet
+        tweet : Tweet
             The Tweet received
         """
         pass
@@ -934,7 +881,7 @@ class StreamingClient(BaseClient, BaseStream):
 
     def on_matching_rules(self, matching_rules):
         """This is called when matching rules are received.
-        
+
         Parameters
         ----------
         matching_rules : list[StreamRule]

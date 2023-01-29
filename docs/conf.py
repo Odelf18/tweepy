@@ -44,7 +44,7 @@ autoclass_content = "both"
 intersphinx_mapping = {
   'python': ('https://docs.python.org/3', None),
   'aiohttp': ('https://docs.aiohttp.org/en/stable/', None),
-  'requests': ('https://docs.python-requests.org/en/stable/', None),
+  'requests': ('https://requests.readthedocs.io/en/stable/', None),
   'requests_oauthlib': (
     'https://requests-oauthlib.readthedocs.io/en/latest/', None
   )
@@ -69,7 +69,7 @@ master_doc = 'index'
 
 # General information about the project.
 project = 'tweepy'
-copyright = '2009-2022, Joshua Roesslein'
+copyright = '2009-2023, Joshua Roesslein'
 
 # The version info for the project you're documenting, acts as replacement for
 # |version| and |release|, also used in various other places throughout the
